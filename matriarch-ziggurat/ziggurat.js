@@ -15,6 +15,12 @@
 // cookies into Elder Frenzy: 1% per 10 ziggurats, up to 20% at 200. It stands aside
 // when another mod (Ouroboros, the Singularity) already decides golden cookies.
 //
+// Ebon wrinklers (1.2): wrinklers black as basalt. Grandmas who come back down the
+// steps (The last step) return as Ebons, and while you own ziggurats some ordinary
+// arrivals do too: 1% per 20 ziggurats, up to 10% at 200. An Ebon's belly fills twice
+// as fast, it takes as many clicks as a shiny, and when it bursts it fills up to two
+// empty wrinkler slots. It counts twice for Summit fires.
+//
 // Built on the game's own systems: Game.Object for the building, Game.TieredUpgrade
 // tiers, the game's synergy and grandma-type helpers, and the official mod API for
 // saving. The game keeps mod content out of its main save, so removing this
@@ -40,6 +46,11 @@
   const OFFERINGS_AT = 66;            // Summit offerings unlocks at 66 ziggurats...
   const OFFERINGS_PER_ZIGGURAT = 0.001; // ...then each ziggurat turns 0.1% of wrath cookies into Elder Frenzy...
   const OFFERINGS_CAP = 0.20;         // ...up to 20%, reached at 200 ziggurats
+  const EBON_PER_ZIGGURAT = 0.0005;   // each ziggurat makes 0.05% of arriving wrinklers Ebon...
+  const EBON_CAP = 0.10;              // ...up to 10%, reached at 200 ziggurats
+  const EBON_BELLY = 2;               // an Ebon wrinkler's belly fills twice as fast
+  const EBON_ARMOR = 6;               // clicks it shrugs off first (9 in all to pop, as many as a shiny)
+  const EBON_REFILL = 2;              // empty wrinkler slots it fills when it bursts
 
   // ---- constants ------------------------------------------------------------
   const NAME = 'Matriarch ziggurat';
@@ -97,9 +108,9 @@
     { name: 'Hymns of ascent', price: 4e18, icon: 3,
       desc: 'Each grandma who has climbed gives <b>+1.5%</b> ziggurat CpS instead of +1%, up to the same <b>+500%</b> cap.', q: 'Mostly the same four notes, sung very, very slowly.' },
     { name: 'Summit fires', price: 8e18, icon: 4,
-      desc: 'Matriarch ziggurats gain <b>+5%</b> CpS for each wrinkler feeding on the big cookie.', q: 'Visible from three universes over. The neighbours have started complaining about the smell.' },
+      desc: 'Matriarch ziggurats gain <b>+5%</b> CpS for each wrinkler feeding on the big cookie. <b>Ebon wrinklers</b> count twice.', q: 'Visible from three universes over. The neighbours have started complaining about the smell.' },
     { name: 'The last step', price: 1.6e19, icon: 5,
-      desc: 'Each grandma who climbs has a <b>5%</b> chance to come back down as a wrinkler.', q: 'She went up. Something came down. It is wearing her glasses.' },
+      desc: 'Each grandma who climbs has a <b>5%</b> chance to come back down as an <b>Ebon wrinkler</b>.', q: 'She went up. Something came down. It is wearing her glasses.' },
     { name: 'Chaos is a ramp', price: 3.2e19, icon: 6,
       desc: 'Grandmas rush the ramp: each minute, a <b>10%</b> chance that <b>ten times</b> a minute\'s usual tithe climbs at once. Grandmas who climb in a surge count <b>double</b> toward the warm steps.', q: 'The last step wasn\'t.' },
   ];
@@ -152,6 +163,10 @@
   let tick = 0;
   let lastFeeding = -1;
   let shownInStore = null;
+  let ebon = {};                // Ebon wrinklers by wrinkler slot: { armor, hitT }
+  let spawnEbon = false;        // the next spawn comes down the steps
+  const ebonArt = {};           // recolored wrinkler sprites, by the game's picture name
+  let ebonIconCache = null;
 
   function freshState() {
     return { active: false, climbed: 0, warm: 0, titheT: 0, minuteT: 0, researchT: -1, researchNext: -1, surges: 0, wrinklers: 0 };
@@ -386,6 +401,11 @@
       if (this.amount > 0 && g > 0) block += '<br>Next tithe in <b>' + Game.sayTime(secs * Game.fps, -1) + '</b>: about <b>' + Beautify(expected, expected < 10 ? 1 : 0) + '</b> ' + (expected === 1 ? 'grandma' : 'grandmas') + '.';
       if (g <= 0) block += '<br><span style="color:#ff8a7a;"><b>No vessels:</b> with no grandmas, ziggurats produce nothing.</span>';
       if (state.researchT > 0 && research[state.researchNext]) block += '<br>Research: <b>' + research[state.researchNext].dname + '</b> in ' + Game.sayTime(state.researchT, -1) + '.';
+      if (state.active && this.amount > 0) {
+        const ec = ebonCount();
+        block += '<br>Ebon wrinklers: <b>' + Beautify(ebonChance() * 100, 2) + '%</b> of arriving wrinklers' +
+          (ec ? ' (<b>' + Beautify(ec) + '</b> on the big cookie now)' : '') + '.';
+      }
       block += '</div>';
       const at = html.lastIndexOf('</div>');
       return at === -1 ? html + block : html.slice(0, at) + block + html.slice(at);
@@ -435,7 +455,8 @@
   // ---- the climb -----------------------------------------------------------------
   const titheFrames = () => Game.fps * 60 * TITHE_MINUTES;
   const warmBonus = () => Math.min(WARM_CAP, state.warm * (Game.Has('Hymns of ascent') ? WARM_PER_GRANDMA_HYMNS : WARM_PER_GRANDMA));
-  function feeding() { let n = 0; for (const w of Game.wrinklers) if (w.phase === 2) n++; return n; }
+  // wrinklers feeding on the big cookie, for Summit fires; Ebons count twice
+  function feeding() { let n = 0; for (const w of Game.wrinklers) if (w.phase === 2) n += ebon[w.id] ? 2 : 1; return n; }
 
   // ---- Summit offerings ----------------------------------------------------------
   const offeringsChance = () => Math.min(OFFERINGS_CAP, me.amount * OFFERINGS_PER_ZIGGURAT);
@@ -452,6 +473,174 @@
     if (Math.random() < offeringsChance()) shimmer.force = 'blood frenzy';
   }
 
+  // ---- Ebon wrinklers -----------------------------------------------------------------
+  // To the game an Ebon is an ordinary wrinkler (type 0), so its own save never sees
+  // anything new. Which ones are Ebon lives here and in this mod's save.
+  const ebonChance = () => (me && state.active) ? Math.min(EBON_CAP, me.amount * EBON_PER_ZIGGURAT) : 0;
+  function ebonCount(feedingOnly) {
+    let n = 0;
+    for (const w of Game.wrinklers) if (ebon[w.id] && (feedingOnly ? w.phase === 2 : w.phase > 0)) n++;
+    return n;
+  }
+  function makeEbon(w) { if (w && w.type === 0) ebon[w.id] = { armor: EBON_ARMOR, hitT: 0 }; return w; }
+  function spawnFromTheSteps() {
+    spawnEbon = true;
+    try { return Game.SpawnWrinkler(); } finally { spawnEbon = false; }
+  }
+
+  // The game's own wrinkler picture, turned to basalt with ember cracks and burning eyes.
+  // Done in the browser from the picture the game already loaded, so no game art ships here.
+  function recolor(img) {
+    const W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const cx = c.getContext('2d'); cx.drawImage(img, 0, 0);
+    const im = cx.getImageData(0, 0, W, H), d = im.data;
+    const L = new Float32Array(W * H), A = new Uint8Array(W * H);
+    for (let i = 0; i < W * H; i++) { A[i] = d[i * 4 + 3] ? 1 : 0; L[i] = A[i] ? (0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]) / 255 : 0; }
+    // summed-area tables, for local averages and for "is this pixel near the outline"
+    const S = new Float64Array((W + 1) * (H + 1)), N = new Float64Array((W + 1) * (H + 1));
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const k = (y + 1) * (W + 1) + x + 1;
+      S[k] = L[y * W + x] + S[k - 1] + S[k - W - 1] - S[k - W - 2];
+      N[k] = A[y * W + x] + N[k - 1] + N[k - W - 1] - N[k - W - 2];
+    }
+    const box = (T, x0, y0, x1, y1) => {
+      x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(W - 1, x1); y1 = Math.min(H - 1, y1);
+      return T[(y1 + 1) * (W + 1) + x1 + 1] - T[y0 * (W + 1) + x1 + 1] - T[(y1 + 1) * (W + 1) + x0] + T[y0 * (W + 1) + x0];
+    };
+    const eyes = [[0.32 * W, 0.175 * H], [0.68 * W, 0.175 * H]], erx = 0.055 * W, ery = 0.015 * H;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x, p = i * 4;
+      if (!A[i]) continue;
+      const r = d[p], g = d[p + 1], b = d[p + 2], l = L[i];
+      const t = Math.min(1, Math.pow(l / 0.70, 1.15));
+      let o = [8 + t * 78, 7 + t * 76, 11 + t * 92];                       // basalt
+      const n = box(N, x - 3, y - 3, x + 3, y + 3);
+      const crease = (n ? box(S, x - 3, y - 3, x + 3, y + 3) / n : 0) - l;
+      const inner = x >= 2 && y >= 2 && x < W - 2 && y < H - 2 && box(N, x - 2, y - 2, x + 2, y + 2) === 25;
+      if (crease > 0.05 && y > 0.11 * H && inner) {                         // ember in the folds
+        const k = Math.pow(Math.min(1, (crease - 0.05) / 0.08), 0.8);
+        o = [o[0] * (1 - k) + 200 * k, o[1] * (1 - k) + 36 * k, o[2] * (1 - k) + 20 * k];
+      }
+      if (g > r && b >= r * 0.8) o = [118, 26, 20];                          // rim light
+      if (y < 0.12 * H && l > 0.42) o = [120 + l * 90, 114 + l * 86, 104 + l * 80];   // teeth stay bone
+      for (const [ex, ey] of eyes) {
+        const e = Math.pow((x - ex) / erx, 2) + Math.pow((y - ey) / ery, 2);
+        if (e <= 1 && l < 0.30) o = [255, 70 + 120 * (1 - e), 30 + 40 * (1 - e)];        // eyes
+      }
+      d[p] = o[0]; d[p + 1] = o[1]; d[p + 2] = o[2];
+    }
+    cx.putImageData(im, 0, 0);
+    return c;
+  }
+  function ebonPic(what, originalPic) {
+    if (ebonArt[what]) return ebonArt[what];
+    // the game loads pictures the first time they're asked for; until then it hands back a blank
+    if (!Game.Loader || Game.Loader.assetsLoaded.indexOf(what) === -1) { originalPic(what); return null; }
+    const img = originalPic(what);
+    if (!img || !img.naturalWidth) return null;
+    try { ebonArt[what] = recolor(img); } catch (e) { console.warn(TAG + ' Could not paint an Ebon wrinkler.', e); ebonArt[what] = img; }
+    return ebonArt[what];
+  }
+  function ebonIcon() {
+    if (ebonIconCache) return ebonIconCache;
+    const art = ebonPic(Game.WINKLERS ? 'winkler.png' : 'wrinkler.png', Pic);
+    if (!art || !art.getContext) return icon(5, 1);
+    const c = document.createElement('canvas'); c.width = c.height = 48;
+    c.getContext('2d').drawImage(art, 10, 0, 80, 80, 0, 0, 48, 48);
+    ebonIconCache = [0, 0, c.toDataURL()];
+    return ebonIconCache;
+  }
+  const EBON_PICS = ['wrinkler.png', 'winterWrinkler.png', 'winkler.png', 'winterWinkler.png'];
+
+  // An Ebon bursts: it leaves room for more.
+  function refill(bursts) {
+    let n = 0;
+    for (let i = 0; i < bursts * EBON_REFILL; i++) if (Game.SpawnWrinkler()) n++;
+    if (n) Game.Notify('Ebon wrinkler', 'It burst, and ' + plural(n, 'more wrinkler crawls', 'more wrinklers crawl') + ' out of the dark.', ebonIcon(), 4, 1);
+    return n;
+  }
+
+  function installEbon() {
+    const originalSpawn = Game.SpawnWrinkler;
+    Game.SpawnWrinkler = function () {
+      const w = originalSpawn.apply(this, arguments);
+      if (w) {
+        delete ebon[w.id];
+        if (w.type === 0 && (spawnEbon || Math.random() < ebonChance())) makeEbon(w);
+      }
+      return w;
+    };
+
+    const originalUpdate = Game.UpdateWrinklers;
+    Game.UpdateWrinklers = function () {
+      let any = false;
+      for (const k in ebon) { any = true; break; }
+      if (!any) return originalUpdate.apply(this, arguments);
+      // The hide: the game gives a click to the first wrinkler under the pointer. If that
+      // one is an Ebon with hide left, the hide takes the click instead.
+      if (Game.Click && Game.CanClick && Game.lastClickedEl === l('backgroundLeftCanvas')) {
+        for (const w of Game.wrinklers) {
+          if (w.phase > 0 && w.selected) {
+            const e = ebon[w.id];
+            if (e && e.armor > 0) {
+              e.armor--; e.hitT = Game.T; w.hurt = 1; w.clicks++;
+              Game.playWrinklerSquishSound();
+              if (Game.prefs.particles && !Game.prefs.notScary && !Game.WINKLERS) {
+                const x = w.x + Math.sin(w.r * Math.PI / 180) * 90, y = w.y + Math.cos(w.r * Math.PI / 180) * 90;
+                for (let i = 0; i < 3; i++) { const part = Game.particleAdd(x, y, Math.random() * 4 - 2, Math.random() * -2 - 2, 1, 1, 2, 'wrinklerBits.png'); if (part) part.r = -w.r; }
+              }
+              Game.Click = 0;
+            }
+            break;
+          }
+        }
+      }
+      const alive = [];
+      for (const w of Game.wrinklers) if (ebon[w.id] && w.phase > 0) alive.push([w, w.clicks]);
+      const result = originalUpdate.apply(this, arguments);
+      let burst = 0;
+      for (const [w, clicks] of alive) {
+        const e = ebon[w.id];
+        if (!e) continue;
+        if (w.phase === 0) { delete ebon[w.id]; burst++; continue; }
+        if (w.clicks !== clicks) e.hitT = Game.T;                     // hit through the hide: it stays open
+        // the belly: the elders feed it as much again as the game does
+        if (w.phase === 2) w.sucked += (Game.cookiesPs / Game.fps) * Game.cpsSucked * (EBON_BELLY - 1);
+        // the hide closes again, a click's worth each second it isn't hit
+        if (e.armor < EBON_ARMOR && Game.T - e.hitT >= Game.fps) { e.armor++; e.hitT = Game.T; }
+      }
+      if (burst && !Game.OnAscend && !(Game.AscendTimer > 0)) refill(burst);
+      return result;
+    };
+
+    // Drawn in two passes through the game's own wrinkler drawing: everything else, then
+    // the Ebons with their picture swapped for the basalt one.
+    const originalDraw = Game.DrawWrinklers;
+    Game.DrawWrinklers = function () {
+      let any = false;
+      for (const w of Game.wrinklers) if (ebon[w.id] && w.phase > 0) { any = true; break; }
+      if (!any) return originalDraw.apply(this, arguments);
+      const parked = [];
+      const park = (keepEbon) => { for (const w of Game.wrinklers) if (w.phase > 0 && !!ebon[w.id] !== keepEbon) { parked.push([w, w.phase]); w.phase = 0; } };
+      const unpark = () => { while (parked.length) { const [w, p] = parked.pop(); w.phase = p; } };
+      park(false);
+      try { originalDraw.apply(this, arguments); } finally { unpark(); }
+      park(true);
+      const originalPic = window.Pic;
+      window.Pic = function (what) { return (EBON_PICS.indexOf(what) !== -1 && ebonPic(what, originalPic)) || originalPic(what); };
+      try { originalDraw.apply(this, arguments); } finally { window.Pic = originalPic; unpark(); }
+    };
+  }
+
+  function restoreEbon(count) {
+    ebon = {};
+    for (const w of Game.wrinklers) {
+      if (count <= 0) break;
+      if (w.phase > 0 && w.type === 0) { makeEbon(w); count--; }
+    }
+  }
+
   // n grandmas climb the steps and are gone; weight is how much each counts toward the warm steps
   function climb(n, weight, why) {
     const g = Game.Objects['Grandma'];
@@ -463,7 +652,7 @@
     state.climbed += n; state.warm += n * weight;
     let wrinklers = 0;
     if (Game.Has('The last step')) {
-      for (let i = 0; i < n; i++) if (Math.random() < WRINKLER_CHANCE && Game.SpawnWrinkler()) wrinklers++;
+      for (let i = 0; i < n; i++) if (Math.random() < WRINKLER_CHANCE && spawnFromTheSteps()) wrinklers++;
       if (wrinklers) { state.wrinklers += wrinklers; Game.Win('She came back down'); }
     }
     if (state.climbed >= 666) Game.Win('The steps are warm');
@@ -473,11 +662,11 @@
     Game.recalculateGains = 1; Game.storeToRefresh = 1;
     if (why === 'tithe' && TITHE_NOTES) {
       Game.Notify('The tithe', plural(n, 'grandma climbs', 'grandmas climb') + ' the ziggurats.' +
-        (wrinklers ? ' ' + plural(wrinklers, 'thing', 'things') + ' came back down.' : '') +
+        (wrinklers ? ' ' + plural(wrinklers, 'thing', 'things') + ' came back down, black as basalt.' : '') +
         (emptied ? ' <b>That was the last of them.</b>' : ''), icon(1, 3), 4, 1);
     } else if (why === 'surge') {
       Game.Notify('Chaos is a ramp', 'Grandmas rush the ramp: <b>' + Beautify(n) + '</b> climb at once, and count double.' +
-        (wrinklers ? ' ' + plural(wrinklers, 'thing', 'things') + ' came back down.' : ''), icon(6, 1));
+        (wrinklers ? ' ' + plural(wrinklers, 'thing', 'things') + ' came back down, black as basalt.' : ''), icon(6, 1));
     } else if (emptied) {
       Game.Notify('Empty nest', 'That was the last of your grandmas. Ziggurats produce nothing until more arrive.', icon(2, 3));
     }
@@ -625,6 +814,7 @@
         return originalLock.apply(this, arguments);
       };
       keepBuildingBuffsOutOfSave();
+      installEbon();
       // Summit offerings: a look at each wrath cookie before the game picks its effect
       const golden = Game.shimmerTypes && Game.shimmerTypes.golden;
       if (golden && typeof golden.popFunc === 'function') {
@@ -639,6 +829,7 @@
       Game.registerHook('check', vanillaBuildingChecks);
       Game.registerHook('reset', function () {
         state = freshState();
+        ebon = {};
         lastFeeding = -1;
         setActive(false, true);
       });
@@ -656,6 +847,8 @@
         u: ourUpgrades.map(u => (u.unlocked ? 1 : 0) + (u.bought ? 2 : 0)),
         a: ourAchievements.map(a => (a.won ? 1 : 0)),
         s: state,
+        // Ebon wrinklers the game will restore (it keeps only those that have eaten something)
+        e: Game.wrinklers.filter(w => ebon[w.id] && w.phase > 0 && w.type === 0 && w.sucked > 0.5).length,
       });
     },
     load: function (str) {
@@ -673,6 +866,7 @@
       // research carries on while the game is closed, as the game's own does
       if (state.researchT > 0 && d.t) state.researchT = Math.max(1, state.researchT - Math.ceil((Date.now() - d.t) / 1000 * Game.fps));
       setActive(state.active, true);
+      restoreEbon(d.e | 0);
       recount();
       me.pics = [];
       me.refresh();
@@ -687,6 +881,11 @@
     climb: function (n, weight) { return climb(n, weight || 1, 'test'); },
     finishResearch: function () { if (state.researchT > 0) { state.researchT = 1; } },
     offerings: function () { return { chance: offeringsChance(), owned: Game.Has(OFFERINGS.name), standingAside: takenOver() }; },
+    ebon: function () {
+      const live = Game.wrinklers.filter(w => ebon[w.id] && w.phase > 0);
+      return { chance: ebonChance(), count: live.length, feeding: ebonCount(true), slots: live.map(w => w.id), armor: live.map(w => ebon[w.id].armor) };
+    },
+    spawnEbon: function () { return spawnFromTheSteps(); },
   };
 
   // Nothing (if installed) prices itself from its position as the 21st building, so let it go first.
