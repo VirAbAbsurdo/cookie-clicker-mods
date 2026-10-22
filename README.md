@@ -24,6 +24,7 @@ Once you've researched the Elder Pact, the store offers a third answer next to t
 - **The tithe.** Every 5 game-minutes, about one grandma per 10 ziggurats climbs the steps and is gone.
 - **The warm steps.** Every grandma who has climbed this run gives ziggurats +1% CpS, up to +500%. With no grandmas left, ziggurats produce nothing.
 - **The climb.** A six-step research branch opens with the rite: Stairlifts, Ancestral mortar, Hymns of ascent, Summit fires, The last step and Chaos is a ramp.
+- **Summit offerings.** At 66 ziggurats an upgrade unlocks that turns some wrath cookies into an Elder Frenzy: 1% per 10 ziggurats, up to 20% at 200. Its tooltip shows the current rate. If another mod already decides every golden cookie's effect, it stays out of the way.
 
 ## Installing
 
@@ -68,6 +69,11 @@ The extensions run on `orteil.dashnet.org/cookieclicker` and load automatically 
 Both mods save through the game's own mod system, which keeps their data apart from your vanilla save. Removing them can't damage it. If you play a session without them, their data is kept for the next time you load them.
 
 Made for game version 2.058, the web version. The Steam version isn't supported.
+
+## Changes
+
+- **Matriarch Ziggurat 1.1.0:** Summit offerings. Also fixes a bug where a golden cookie's building special on the ziggurat, if it was still running when the game saved, stopped the game from loading on your next visit.
+- **Nothing 1.2.2:** the same loading fix, for building specials on Nothing.
 
 ## License
 

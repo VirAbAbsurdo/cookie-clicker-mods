@@ -541,8 +541,30 @@
     Game.AchievementsOwned = a;
   }
 
+  // A golden cookie "building special" on Nothing must not reach the game's save.
+  // The game restores buffs while it loads, before any mod has added its building, and
+  // an unknown building there stops it mid-load (the page never finishes starting).
+  // These buffs last half a minute, so leaving them out of the save costs nothing.
+  function keepBuildingBuffsOutOfSave() {
+    const originalWriteSave = Game.WriteSave;
+    Game.WriteSave = function () {
+      const hidden = [];
+      for (const k in Game.buffs) {
+        const b = Game.buffs[k];
+        // arg1 is the power, arg2 the building
+        if (b && b.type && me && (b.type.name === 'building buff' || b.type.name === 'building debuff') && +b.arg2 === me.id) {
+          hidden.push([b, b.type]);
+          b.type = { name: b.type.name, vanilla: 0 };
+        }
+      }
+      try { return originalWriteSave.apply(this, arguments); }
+      finally { for (const [b, t] of hidden) b.type = t; }
+    };
+  }
+
   const mod = {
     init: function () {
+      keepBuildingBuffsOutOfSave();
       const originalEarn = Game.Earn;
       Game.Earn = function (howmuch) {
         if (decaying) { if (Game.OnAscend) decaying = false; else return; }
