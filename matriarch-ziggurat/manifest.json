@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Matriarch Ziggurat",
+  "version": "1.0.1",
+  "description": "Adds the Elder Apotheosis to Cookie Clicker's Grandmapocalypse, and the building it unlocks: the Matriarch ziggurat.",
+  "content_scripts": [
+    {
+      "matches": [
+        "*://orteil.dashnet.org/cookieclicker/*"
+      ],
+      "js": [
+        "ziggurat.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    }
+  ]
+}

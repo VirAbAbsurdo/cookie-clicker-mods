@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Nothing",
+  "version": "1.2.1",
+  "description": "Adds a 21st building to Cookie Clicker: Nothing. Cookies from the void itself, at the risk of the void phage.",
+  "content_scripts": [
+    {
+      "matches": [
+        "*://orteil.dashnet.org/cookieclicker/*"
+      ],
+      "js": [
+        "nothing.js"
+      ],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    }
+  ]
+}
