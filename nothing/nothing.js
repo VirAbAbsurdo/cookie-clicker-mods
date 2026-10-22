@@ -162,6 +162,65 @@
   const rand = (a, b) => a + Math.random() * (b - a);
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
+  // Nothing of ours may stop the game. Cookie Clicker's main loop dies on the first error
+  // thrown inside a frame, so everything of ours that runs every frame goes through this:
+  // an error is reported once to the console and the frame carries on.
+  const failures = {};
+  function report(label, e) {
+    failures[label] = (failures[label] || 0) + 1;
+    if (failures[label] === 1) console.error(TAG + ' ' + label + ' failed; the game carries on.', e);
+  }
+  function guard(label, fn, fallback) {
+    return function () {
+      try { return fn.apply(this, arguments); }
+      catch (e) { report(label, e); return typeof fallback === 'function' ? fallback.apply(this, arguments) : fallback; }
+    };
+  }
+
+  // Cookie Monster keeps a table for every building. If it was loaded first, it learns a
+  // new building only when the game next recalculates its gains, and if any mod registers
+  // before then, its full refresh trips over the stranger and stops the game. So the
+  // building goes up first, and the mod registers once Cookie Monster's tables include it.
+  const cookieMonsterLoaded = () => !!(window.CookieMonsterData || (Game.mods && (Game.mods.CookieMonster || Game.mods.cookieMonsterMod)));
+  function cookieMonsterKnowsAll() {
+    const c = window.CookieMonsterData && window.CookieMonsterData.Cache && window.CookieMonsterData.Cache.ObjectsNextAchievement;
+    if (!c) return null;                                   // a version that doesn't share its tables
+    for (const k in Game.Objects) if (!Object.prototype.hasOwnProperty.call(c, k)) return false;   // own keys: the patch below answers "in"
+    return true;
+  }
+  // Cookie Monster can't take in a building added after it loaded: every one of its
+  // refreshes reads its "till next achievement" table for each building before checking
+  // whether it should rebuild that table, and a building it hasn't seen isn't in it. Until
+  // it has rebuilt the table once with ours, that one table is answered for our name, and
+  // nothing else: other objects see the name as absent, and writing it works as usual.
+  function shimCookieMonster(name) {
+    if (Object.prototype.hasOwnProperty.call(Object.prototype, name)) return null;
+    const stub = { TotalNeeded: 0, AmountNeeded: 0, price: 0 };
+    Object.defineProperty(Object.prototype, name, {
+      configurable: true, enumerable: false,
+      get: function () {
+        const c = this && Object.prototype.hasOwnProperty.call(this, 'Cursor') ? this.Cursor : null;
+        return c && typeof c === 'object' && 'TotalNeeded' in c ? stub : undefined;
+      },
+      set: function (v) { Object.defineProperty(this, name, { value: v, writable: true, enumerable: true, configurable: true }); },
+    });
+    return function () { delete Object.prototype[name]; };
+  }
+
+  function registerWhenSafe(register) {
+    const t0 = Game.T, started = Date.now();
+    Game.recalculateGains = 1;
+    const wait = setInterval(function () {
+      const knows = cookieMonsterLoaded() ? cookieMonsterKnowsAll() : true;
+      const settled = Game.T >= t0 + 2 && (knows === true || (knows === null && Date.now() - started > 1000));
+      const late = Date.now() - started > 10000;
+      if (!settled && !late) { Game.recalculateGains = 1; return; }
+      if (late && !settled) console.warn(TAG + ' Cookie Monster has not caught up with the new building; registering anyway.');
+      clearInterval(wait);
+      register();
+    }, 50);
+  }
+
   function dataToBlobUrl(dataUrl) {
     const b64 = dataUrl.split(',')[1];
     const bin = atob(b64); const bytes = new Uint8Array(bin.length);
@@ -330,7 +389,7 @@
 
     // show the phage's current appetite in the building's tooltip
     const originalTooltip = me.tooltip;
-    me.tooltip = function () {
+    me.tooltip = guard('tooltip', function () {
       updateOdds();
       // the game draws this tooltip's icon from its own icon sheet by column; point it at ours
       const html = originalTooltip.call(this).replace('<div class="icon" style="float:left;margin-left:-8px;margin-top:-8px;',
@@ -347,7 +406,7 @@
           : 'stable while you own ' + DECAY_THRESHOLD + ' or fewer Nothings.') + '</div>';
       const at = html.lastIndexOf('</div>');
       return at === -1 ? html + block : html.slice(0, at) + block + html.slice(at);
-    };
+    }, function () { return originalTooltip.call(this); });
 
     me.refresh();
     return true;
@@ -549,14 +608,16 @@
     const originalWriteSave = Game.WriteSave;
     Game.WriteSave = function () {
       const hidden = [];
-      for (const k in Game.buffs) {
-        const b = Game.buffs[k];
-        // arg1 is the power, arg2 the building
-        if (b && b.type && me && (b.type.name === 'building buff' || b.type.name === 'building debuff') && +b.arg2 === me.id) {
-          hidden.push([b, b.type]);
-          b.type = { name: b.type.name, vanilla: 0 };
+      try {
+        for (const k in Game.buffs) {
+          const b = Game.buffs[k];
+          // arg1 is the power, arg2 the building
+          if (b && b.type && me && (b.type.name === 'building buff' || b.type.name === 'building debuff') && +b.arg2 === me.id) {
+            hidden.push([b, b.type]);
+            b.type = { name: b.type.name, vanilla: 0 };
+          }
         }
-      }
+      } catch (e) { report('save filter', e); }
       try { return originalWriteSave.apply(this, arguments); }
       finally { for (const [b, t] of hidden) b.type = t; }
     };
@@ -570,17 +631,17 @@
         if (decaying) { if (Game.OnAscend) decaying = false; else return; }
         return originalEarn.call(this, howmuch);
       };
-      Game.registerHook('logic', onLogic);
-      Game.registerHook('reset', function (hard) {
+      Game.registerHook('logic', guard('logic', onLogic));
+      Game.registerHook('reset', guard('reset', function (hard) {
         warnedThisRun = false; decaying = false; stats.above150 = 0;
         if (hard) stats = freshStats();
-      });
-      Game.registerHook('ticker', function () {
+      }));
+      Game.registerHook('ticker', guard('ticker', function () {
         if (!me || me.amount <= 0) return [];
         return TICKER.slice();
-      });
+      }, []));
     },
-    save: function () {
+    save: guard('save', function () {
       if (!me) return;
       return JSON.stringify({
         v: 3,
@@ -589,8 +650,8 @@
         a: ourAchievements.map(a => (a.won ? 1 : 0)),
         s: stats,
       });
-    },
-    load: function (str) {
+    }),
+    load: guard('load', function (str) {
       if (!me || !str) return;
       let d;
       try { d = JSON.parse(str); } catch (e) { console.warn(TAG + ' Could not read saved data.', e); return; }
@@ -609,7 +670,7 @@
       updateOdds();
       checkUnlocks();
       Game.recalculateGains = 1; Game.upgradesToRebuild = 1; Game.storeToRefresh = 1;
-    },
+    }),
     _acceptRisk: function () { warnedThisRun = true; },
     // for testing from the console
     phage: function (type) { return phageStrikes(type); },
@@ -621,14 +682,24 @@
   const waitForGame = setInterval(function () {
     if (!(window.Game && Game.ready && Game.Object && Game.ObjectsById && Game.ObjectsById.length >= 20 && document.getElementById('products'))) return;
     clearInterval(waitForGame);
+    const unshim = cookieMonsterLoaded() ? shimCookieMonster(NAME) : null;
     try {
-      if (!create()) return;
-      Game.registerMod(MOD_ID, mod);
-      updateOdds();
-      console.log(TAG + ' The ultimate ensemble has an edge, and you have found it. Nothing is now for sale.');
+      if (!create()) { if (unshim) unshim(); return; }
     } catch (e) {
+      if (unshim) unshim();
       console.error(TAG + ' Failed to load:', e);
+      return;
     }
+    registerWhenSafe(function () {
+      if (unshim) unshim();
+      try {
+        Game.registerMod(MOD_ID, mod);
+        updateOdds();
+        console.log(TAG + ' The ultimate ensemble has an edge, and you have found it. Nothing is now for sale.');
+      } catch (e) {
+        console.error(TAG + ' Failed to load:', e);
+      }
+    });
   }, 250);
 })();
 

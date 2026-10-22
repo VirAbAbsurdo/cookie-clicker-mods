@@ -174,6 +174,65 @@
   const icon = (col, row) => [col, row, urls.icons];
   const plural = (n, one, many) => Beautify(n) + ' ' + (n === 1 ? one : many);
 
+  // Nothing of ours may stop the game. Cookie Clicker's main loop dies on the first error
+  // thrown inside a frame, so everything of ours that runs every frame goes through this:
+  // an error is reported once to the console and the frame carries on.
+  const failures = {};
+  function report(label, e) {
+    failures[label] = (failures[label] || 0) + 1;
+    if (failures[label] === 1) console.error(TAG + ' ' + label + ' failed; the game carries on.', e);
+  }
+  function guard(label, fn, fallback) {
+    return function () {
+      try { return fn.apply(this, arguments); }
+      catch (e) { report(label, e); return typeof fallback === 'function' ? fallback.apply(this, arguments) : fallback; }
+    };
+  }
+
+  // Cookie Monster keeps a table for every building. If it was loaded first, it learns a
+  // new building only when the game next recalculates its gains, and if any mod registers
+  // before then, its full refresh trips over the stranger and stops the game. So the
+  // building goes up first, and the mod registers once Cookie Monster's tables include it.
+  const cookieMonsterLoaded = () => !!(window.CookieMonsterData || (Game.mods && (Game.mods.CookieMonster || Game.mods.cookieMonsterMod)));
+  function cookieMonsterKnowsAll() {
+    const c = window.CookieMonsterData && window.CookieMonsterData.Cache && window.CookieMonsterData.Cache.ObjectsNextAchievement;
+    if (!c) return null;                                   // a version that doesn't share its tables
+    for (const k in Game.Objects) if (!Object.prototype.hasOwnProperty.call(c, k)) return false;   // own keys: the patch below answers "in"
+    return true;
+  }
+  // Cookie Monster can't take in a building added after it loaded: every one of its
+  // refreshes reads its "till next achievement" table for each building before checking
+  // whether it should rebuild that table, and a building it hasn't seen isn't in it. Until
+  // it has rebuilt the table once with ours, that one table is answered for our name, and
+  // nothing else: other objects see the name as absent, and writing it works as usual.
+  function shimCookieMonster(name) {
+    if (Object.prototype.hasOwnProperty.call(Object.prototype, name)) return null;
+    const stub = { TotalNeeded: 0, AmountNeeded: 0, price: 0 };
+    Object.defineProperty(Object.prototype, name, {
+      configurable: true, enumerable: false,
+      get: function () {
+        const c = this && Object.prototype.hasOwnProperty.call(this, 'Cursor') ? this.Cursor : null;
+        return c && typeof c === 'object' && 'TotalNeeded' in c ? stub : undefined;
+      },
+      set: function (v) { Object.defineProperty(this, name, { value: v, writable: true, enumerable: true, configurable: true }); },
+    });
+    return function () { delete Object.prototype[name]; };
+  }
+
+  function registerWhenSafe(register) {
+    const t0 = Game.T, started = Date.now();
+    Game.recalculateGains = 1;
+    const wait = setInterval(function () {
+      const knows = cookieMonsterLoaded() ? cookieMonsterKnowsAll() : true;
+      const settled = Game.T >= t0 + 2 && (knows === true || (knows === null && Date.now() - started > 1000));
+      const late = Date.now() - started > 10000;
+      if (!settled && !late) { Game.recalculateGains = 1; return; }
+      if (late && !settled) console.warn(TAG + ' Cookie Monster has not caught up with the new building; registering anyway.');
+      clearInterval(wait);
+      register();
+    }, 50);
+  }
+
   function dataToBlobUrl(dataUrl) {
     const b64 = dataUrl.split(',')[1];
     const bin = atob(b64); const bytes = new Uint8Array(bin.length);
@@ -298,13 +357,13 @@
     rite.priceFunc = function () { return RITE_PRICE; };
     rite.canBuyFunc = function () { return Game.cookies >= this.getPrice() && Game.Objects['Grandma'].amount >= RITE_GRANDMAS; };
     rite.clickFunction = function () { if (this.canBuy() && userGesture()) confirmRite(); return false; };
-    rite.descFunc = function () {
+    rite.descFunc = guard('rite tooltip', function () {
       const g = Game.Objects['Grandma'].amount;
       return '<div style="text-align:center;">' + (g >= RITE_GRANDMAS
         ? 'You have <b>' + Beautify(g) + '</b> grandmas. Sixty-six will climb first.'
         : '<span style="color:#ff8a7a;">Needs <b>' + RITE_GRANDMAS + '</b> grandmas. You have <b>' + Beautify(g) + '</b>.</span>') +
         '<div class="line"></div></div>' + this.ddesc;
-    };
+    }, function () { return this.ddesc; });
     ourUpgrades.push(rite);
 
     // the climb: research, each step unlocking the next after the game's research time
@@ -362,11 +421,11 @@
       Math.round(OFFERINGS_CAP * 100) + '%</b> at ' + Math.round(OFFERINGS_CAP / OFFERINGS_PER_ZIGGURAT) + ' ziggurats.<q>' + OFFERINGS.q + '</q>',
       OFFERINGS.price, icon(OFFERINGS.icon, 2));
     offerings.pool = ''; offerings.order = 31050; offerings.ddesc = BeautifyInText(offerings.desc);
-    offerings.descFunc = function () {
+    offerings.descFunc = guard('Summit offerings tooltip', function () {
       return '<div style="text-align:center;">With <b>' + plural(me.amount, 'ziggurat', 'ziggurats') + '</b>: <b>' +
         Beautify(offeringsChance() * 100, 1) + '%</b> of wrath cookies.' + (takenOver() ? '<br><small>Another mod is deciding golden cookies, so this stands aside.</small>' : '') +
         '<div class="line"></div></div>' + this.ddesc;
-    };
+    }, function () { return this.ddesc; });
     ourUpgrades.push(offerings);
 
     // achievements for owning ziggurats, at the game's usual thresholds
@@ -386,7 +445,7 @@
 
     // the climb in the building's tooltip
     const originalTooltip = me.tooltip;
-    me.tooltip = function () {
+    me.tooltip = guard('tooltip', function () {
       let html = originalTooltip.call(this);
       html = html.replace(/<div class="icon" style="float:left;margin-left:-8px;margin-top:-8px;[^"]*"/,
         '<div class="icon" style="float:left;margin-left:-8px;margin-top:-8px;background-image:url(\'' + urls.icons + '\');background-position:-192px -144px;"');
@@ -409,7 +468,7 @@
       block += '</div>';
       const at = html.lastIndexOf('</div>');
       return at === -1 ? html + block : html.slice(0, at) + block + html.slice(at);
-    };
+    }, function () { return originalTooltip.call(this); });
 
     setActive(false, true);
     return true;
@@ -561,56 +620,72 @@
     return n;
   }
 
+  // Before the game's wrinkler update: the hide. Returns the Ebons alive going in, or null.
+  function ebonBeforeUpdate() {
+    let any = false;
+    for (const k in ebon) { any = true; break; }
+    if (!any) return null;
+    // The game gives a click to the first wrinkler under the pointer. If that one is an
+    // Ebon with hide left, the hide takes the click instead.
+    if (Game.Click && Game.CanClick && Game.lastClickedEl === l('backgroundLeftCanvas')) {
+      for (const w of Game.wrinklers) {
+        if (w.phase > 0 && w.selected) {
+          const e = ebon[w.id];
+          if (e && e.armor > 0) {
+            e.armor--; e.hitT = Game.T; w.hurt = 1; w.clicks++;
+            Game.playWrinklerSquishSound();
+            if (Game.prefs.particles && !Game.prefs.notScary && !Game.WINKLERS) {
+              const x = w.x + Math.sin(w.r * Math.PI / 180) * 90, y = w.y + Math.cos(w.r * Math.PI / 180) * 90;
+              for (let i = 0; i < 3; i++) { const part = Game.particleAdd(x, y, Math.random() * 4 - 2, Math.random() * -2 - 2, 1, 1, 2, 'wrinklerBits.png'); if (part) part.r = -w.r; }
+            }
+            Game.Click = 0;
+          }
+          break;
+        }
+      }
+    }
+    const alive = [];
+    for (const w of Game.wrinklers) if (ebon[w.id] && w.phase > 0) alive.push([w, w.clicks]);
+    return alive;
+  }
+
+  // After it: bellies, bursts and the hide closing again.
+  function ebonAfterUpdate(alive) {
+    let burst = 0;
+    for (const [w, clicks] of alive) {
+      const e = ebon[w.id];
+      if (!e) continue;
+      if (w.phase === 0) { delete ebon[w.id]; burst++; continue; }
+      if (w.clicks !== clicks) e.hitT = Game.T;                     // hit through the hide: it stays open
+      // the belly: the elders feed it as much again as the game does
+      if (w.phase === 2) w.sucked += (Game.cookiesPs / Game.fps) * Game.cpsSucked * (EBON_BELLY - 1);
+      // the hide closes again, a click's worth each second it isn't hit
+      if (e.armor < EBON_ARMOR && Game.T - e.hitT >= Game.fps) { e.armor++; e.hitT = Game.T; }
+    }
+    if (burst && !Game.OnAscend && !(Game.AscendTimer > 0)) refill(burst);
+  }
+
+  // Each wrapper below always runs the game's own function exactly once; only our part
+  // around it is guarded, so an error of ours can't stop a frame.
   function installEbon() {
     const originalSpawn = Game.SpawnWrinkler;
     Game.SpawnWrinkler = function () {
       const w = originalSpawn.apply(this, arguments);
       if (w) {
-        delete ebon[w.id];
-        if (w.type === 0 && (spawnEbon || Math.random() < ebonChance())) makeEbon(w);
+        try {
+          delete ebon[w.id];
+          if (w.type === 0 && (spawnEbon || Math.random() < ebonChance())) makeEbon(w);
+        } catch (e) { report('Ebon spawn', e); }
       }
       return w;
     };
 
     const originalUpdate = Game.UpdateWrinklers;
     Game.UpdateWrinklers = function () {
-      let any = false;
-      for (const k in ebon) { any = true; break; }
-      if (!any) return originalUpdate.apply(this, arguments);
-      // The hide: the game gives a click to the first wrinkler under the pointer. If that
-      // one is an Ebon with hide left, the hide takes the click instead.
-      if (Game.Click && Game.CanClick && Game.lastClickedEl === l('backgroundLeftCanvas')) {
-        for (const w of Game.wrinklers) {
-          if (w.phase > 0 && w.selected) {
-            const e = ebon[w.id];
-            if (e && e.armor > 0) {
-              e.armor--; e.hitT = Game.T; w.hurt = 1; w.clicks++;
-              Game.playWrinklerSquishSound();
-              if (Game.prefs.particles && !Game.prefs.notScary && !Game.WINKLERS) {
-                const x = w.x + Math.sin(w.r * Math.PI / 180) * 90, y = w.y + Math.cos(w.r * Math.PI / 180) * 90;
-                for (let i = 0; i < 3; i++) { const part = Game.particleAdd(x, y, Math.random() * 4 - 2, Math.random() * -2 - 2, 1, 1, 2, 'wrinklerBits.png'); if (part) part.r = -w.r; }
-              }
-              Game.Click = 0;
-            }
-            break;
-          }
-        }
-      }
-      const alive = [];
-      for (const w of Game.wrinklers) if (ebon[w.id] && w.phase > 0) alive.push([w, w.clicks]);
+      let alive = null;
+      try { alive = ebonBeforeUpdate(); } catch (e) { report('Ebon update', e); }
       const result = originalUpdate.apply(this, arguments);
-      let burst = 0;
-      for (const [w, clicks] of alive) {
-        const e = ebon[w.id];
-        if (!e) continue;
-        if (w.phase === 0) { delete ebon[w.id]; burst++; continue; }
-        if (w.clicks !== clicks) e.hitT = Game.T;                     // hit through the hide: it stays open
-        // the belly: the elders feed it as much again as the game does
-        if (w.phase === 2) w.sucked += (Game.cookiesPs / Game.fps) * Game.cpsSucked * (EBON_BELLY - 1);
-        // the hide closes again, a click's worth each second it isn't hit
-        if (e.armor < EBON_ARMOR && Game.T - e.hitT >= Game.fps) { e.armor++; e.hitT = Game.T; }
-      }
-      if (burst && !Game.OnAscend && !(Game.AscendTimer > 0)) refill(burst);
+      if (alive) { try { ebonAfterUpdate(alive); } catch (e) { report('Ebon update', e); } }
       return result;
     };
 
@@ -619,7 +694,7 @@
     const originalDraw = Game.DrawWrinklers;
     Game.DrawWrinklers = function () {
       let any = false;
-      for (const w of Game.wrinklers) if (ebon[w.id] && w.phase > 0) { any = true; break; }
+      try { for (const w of Game.wrinklers) if (ebon[w.id] && w.phase > 0) { any = true; break; } } catch (e) { report('Ebon drawing', e); }
       if (!any) return originalDraw.apply(this, arguments);
       const parked = [];
       const park = (keepEbon) => { for (const w of Game.wrinklers) if (w.phase > 0 && !!ebon[w.id] !== keepEbon) { parked.push([w, w.phase]); w.phase = 0; } };
@@ -628,7 +703,12 @@
       try { originalDraw.apply(this, arguments); } finally { unpark(); }
       park(true);
       const originalPic = window.Pic;
-      window.Pic = function (what) { return (EBON_PICS.indexOf(what) !== -1 && ebonPic(what, originalPic)) || originalPic(what); };
+      window.Pic = function (what) {
+        if (EBON_PICS.indexOf(what) !== -1) {
+          try { const art = ebonPic(what, originalPic); if (art) return art; } catch (e) { report('Ebon drawing', e); }
+        }
+        return originalPic(what);
+      };
       try { originalDraw.apply(this, arguments); } finally { window.Pic = originalPic; unpark(); }
     };
   }
@@ -769,14 +849,16 @@
     const originalWriteSave = Game.WriteSave;
     Game.WriteSave = function () {
       const hidden = [];
-      for (const k in Game.buffs) {
-        const b = Game.buffs[k];
-        // arg1 is the power, arg2 the building
-        if (b && b.type && me && (b.type.name === 'building buff' || b.type.name === 'building debuff') && +b.arg2 === me.id) {
-          hidden.push([b, b.type]);
-          b.type = { name: b.type.name, vanilla: 0 };
+      try {
+        for (const k in Game.buffs) {
+          const b = Game.buffs[k];
+          // arg1 is the power, arg2 the building
+          if (b && b.type && me && (b.type.name === 'building buff' || b.type.name === 'building debuff') && +b.arg2 === me.id) {
+            hidden.push([b, b.type]);
+            b.type = { name: b.type.name, vanilla: 0 };
+          }
         }
-      }
+      } catch (e) { report('save filter', e); }
       try { return originalWriteSave.apply(this, arguments); }
       finally { for (const [b, t] of hidden) b.type = t; }
     };
@@ -796,7 +878,8 @@
       // the wrath stays at its peak while the rite holds
       const originalUpdate = Game.UpdateGrandmapocalypse;
       Game.UpdateGrandmapocalypse = function () {
-        if (state.active) { Game.pledgeT = 0; if (Game.Objects['Grandma'].amount > 0) Game.elderWrath = 3; }
+        try { if (state.active) { Game.pledgeT = 0; if (Game.Objects['Grandma'].amount > 0) Game.elderWrath = 3; } }
+        catch (e) { report('wrath lock', e); }
         return originalUpdate.apply(this, arguments);
       };
       // ...and the Pledge and Covenant stay off the table
@@ -820,25 +903,25 @@
       if (golden && typeof golden.popFunc === 'function') {
         const originalPop = golden.popFunc;
         golden.popFunc = function (shimmer) {
-          try { offer(shimmer, this); } catch (e) { console.warn(TAG + ' Summit offerings skipped a cookie.', e); }
+          try { offer(shimmer, this); } catch (e) { report('Summit offerings', e); }
           return originalPop.apply(this, arguments);
         };
       }
-      Game.registerHook('logic', onLogic);
-      Game.registerHook('draw', onDraw);
-      Game.registerHook('check', vanillaBuildingChecks);
-      Game.registerHook('reset', function () {
+      Game.registerHook('logic', guard('logic', onLogic));
+      Game.registerHook('draw', guard('draw', onDraw));
+      Game.registerHook('check', guard('checks', vanillaBuildingChecks));
+      Game.registerHook('reset', guard('reset', function () {
         state = freshState();
         ebon = {};
         lastFeeding = -1;
         setActive(false, true);
-      });
-      Game.registerHook('ticker', function () {
+      }));
+      Game.registerHook('ticker', guard('ticker', function () {
         if (!me || me.amount <= 0) return [];
         return TICKER.slice();
-      });
+      }, []));
     },
-    save: function () {
+    save: guard('save', function () {
       if (!me) return;
       return JSON.stringify({
         v: 1,
@@ -850,8 +933,8 @@
         // Ebon wrinklers the game will restore (it keeps only those that have eaten something)
         e: Game.wrinklers.filter(w => ebon[w.id] && w.phase > 0 && w.type === 0 && w.sucked > 0.5).length,
       });
-    },
-    load: function (str) {
+    }),
+    load: guard('load', function (str) {
       if (!me || !str) return;
       let d;
       try { d = JSON.parse(str); } catch (e) { console.warn(TAG + ' Could not read saved data.', e); return; }
@@ -873,7 +956,7 @@
       checkUnlocks();
       Game.Objects['Grandma'].redraw();
       Game.recalculateGains = 1; Game.upgradesToRebuild = 1; Game.storeToRefresh = 1;
-    },
+    }),
     // for testing from the console
     state: function () { return Object.assign({ warmBonus: warmBonus(), feeding: feeding() }, state); },
     tithe: function () { return tithe(); },
@@ -890,17 +973,34 @@
 
   // Nothing (if installed) prices itself from its position as the 21st building, so let it go first.
   const started = Date.now();
+  // It also waits for Nothing to finish registering, and gives the game two frames after
+  // that, so no mod registers while a building is still new to Cookie Monster.
+  let nothingSeenT = -1;
   const waitForGame = setInterval(function () {
     if (!(window.Game && Game.ready && Game.Object && Game.ObjectsById && Game.ObjectsById.length >= 20 && document.getElementById('products'))) return;
-    if (window.__NOTHING_ART && !Game.Objects['Nothing'] && Date.now() - started < 15000) return;
-    clearInterval(waitForGame);
-    try {
-      if (!create()) return;
-      Game.registerMod(MOD_ID, mod);
-      console.log(TAG + ' The steps are ready. Research the Elder Pact to be offered the Elder Apotheosis.');
-    } catch (e) {
-      console.error(TAG + ' Failed to load:', e);
+    if (window.__NOTHING_ART && Date.now() - started < 15000) {
+      if (!(Game.mods && Game.mods.nothing)) return;
+      if (nothingSeenT < 0) { nothingSeenT = Game.T; return; }
+      if (Game.T < nothingSeenT + 2) return;
     }
+    clearInterval(waitForGame);
+    const unshim = cookieMonsterLoaded() ? shimCookieMonster(NAME) : null;
+    try {
+      if (!create()) { if (unshim) unshim(); return; }
+    } catch (e) {
+      if (unshim) unshim();
+      console.error(TAG + ' Failed to load:', e);
+      return;
+    }
+    registerWhenSafe(function () {
+      if (unshim) unshim();
+      try {
+        Game.registerMod(MOD_ID, mod);
+        console.log(TAG + ' The steps are ready. Research the Elder Pact to be offered the Elder Apotheosis.');
+      } catch (e) {
+        console.error(TAG + ' Failed to load:', e);
+      }
+    });
   }, 250);
 })();
 

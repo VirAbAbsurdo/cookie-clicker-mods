@@ -73,6 +73,7 @@ Made for game version 2.058, the web version. The Steam version isn't supported.
 
 ## Changes
 
+- **Nothing 1.2.3 and Matriarch Ziggurat 1.2.1:** fixed a freeze when the mods were loaded after Cookie Monster. Cookie Monster can't take in a building added after it starts, and its next refresh stopped the game; the mods now wait until it has caught up before they finish loading, so they work in any order. An error in either mod can no longer stop the game either: it's reported in the console and the game carries on.
 - **Matriarch Ziggurat 1.2.0:** Ebon wrinklers.
 - **Matriarch Ziggurat 1.1.0:** Summit offerings. Also fixes a bug where a golden cookie's building special on the ziggurat, if it was still running when the game saved, stopped the game from loading on your next visit.
 - **Nothing 1.2.2:** the same loading fix, for building specials on Nothing.

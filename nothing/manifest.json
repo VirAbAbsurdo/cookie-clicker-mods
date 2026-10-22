@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Nothing",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Adds a 21st building to Cookie Clicker: Nothing. Cookies from the void itself, at the risk of the void phage.",
   "content_scripts": [
     {
